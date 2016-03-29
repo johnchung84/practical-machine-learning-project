@@ -1,0 +1,171 @@
+---
+title: "Prediction Assignment"
+author: "John Chung"
+date: "March 25, 2016"
+output: html_document
+---
+
+# Overview:
+In this project I will use data from accelerometers on the belt, forearm, arm, and dumbbell of 6 participants, to answer the question of can we can predict based on readings from the sensors how *well* they are doing the particular exercise.
+
+# Explore the Data
+The data is from this source: http://groupware.les.inf.puc-rio.br/har. 
+
+I pull in the data (training and testing data slicing already done) and begin exploring the data. 
+
+1. Take a look at the data. 
+```{r}
+library(caret)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+# Download and load training and testing csv file to R
+train.url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+test.url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+
+download.file(train.url,destfile="pml-training.csv",method="curl")
+download.file(test.url,destfile="pml-testing.csv",method="curl")
+
+training <- read.csv("pml-training.csv")
+testing <- read.csv("pml-testing.csv")
+
+dim(training)
+dim(testing)
+```
+
+There are 160 variables(features) in this dataset which is quite a lot. Also, taking a look at the data, you can quitely note that there are some variables that have a lot of NAs. Below is the summary of some of these variables and using the nearZeroVar function we can actually quickly note the variables that show this. 
+
+```{r}
+# Some of the variables with a lot of NA
+summary(training[,18:24])
+
+# Near Zero Variance function
+head(nearZeroVar(training,names=TRUE),15)
+```
+
+You'll note that a lot of variables that have NA are statistical measures of the other features already in the dataset. Also, looking at the testing dataset, all of these variables are set to NA hence they should be removed as predictors for our prediction model. 
+
+```{r}
+# Remove features
+rm.feat<-c("kurtosis","skewness","max","min","amplitude","var","avg","stddev")
+rm.feat<-paste(rm.feat,collapse="|")
+keep.feat.training<-names(training)[!grepl(rm.feat,names(training))]
+keep.feat.testing<-names(testing)[!grepl(rm.feat,names(testing))]
+
+training1 <- training[,keep.feat.training]
+testing1 <- testing[,keep.feat.testing]
+```
+
+Now we have reduced our number of variables from 160 to 60. 
+
+What we have remaining is the following information:
+- We have 4 parts where the sensors are attached: belt, arm, dumbbell, forearm
+- For each of those parts we have readings for the Euler Angle (roll,pitch,yaw), the raw accelerometer, the gyroscope, and the  magnetometer
+
+2. Visualize and pre-process data
+
+Since I am essentially measuring the same type of information for different parts of the body, to get an idea of how the distribution of the data looks like I looked at the readings from the arm and a part of the measurements from the different readings of the sensor. 
+
+```{r}
+# Density plot
+training1 %>% 
+  gather(key="part",value="arm",roll_arm,total_accel_arm,gyros_arm_x,accel_arm_x,magnet_arm_x) %>%
+  ggplot(aes(x=arm,fill=part))+geom_density()+ggtitle("Density curves for different measurements on the arm")  
+```
+
+You'll immediately note that the data varies a lot by feature in density and in range. For this reason, in my model generation I went ahead and did some pre-processing of the variables. 
+
+Also, you'll note that the first 7 variables in the dataset are non-relevant data such as timestamps, user_name, and indicator variables regarding the window in which the data was collected. We want the model to not be dependent on time in which it was measured or who it is that carried out the exercise but rather purely use the data based on the accelerameters. 
+
+```{r}
+# Excluding the first 7 variables and the last one since the last one is our dependent variable
+prePro <- preProcess(training1[,-c(1:7,60)],method=c("center","scale"))
+training1.cs <- predict(prePro,training1[,-c(1:7,60)])
+
+# Density plot
+training1.cs %>% 
+  gather(key="part",value="arm",roll_arm,total_accel_arm,gyros_arm_x,accel_arm_x,magnet_arm_x) %>%
+  ggplot(aes(x=arm,fill=part))+geom_density()+ggtitle("Density curves for different measurements on the arm")  
+```
+
+You'll note that the figure of the pre-processed(centered & scaled) variables show ranges and densities that are similar (other than the fact that some show more modality than others). 
+
+Though I did some dimension reduction by removing the statistical measure variables in the beginning, 60 variables is still quite a bit. So then to further reduce the dimensionality of the variables and hence trying to prevent for overfitting the model, I went ahead and performed principle component analysis on the pre-processed variables.  
+
+```{r}
+# pca on the centered and scaled dataset
+prePro.pca <- preProcess(training1.cs,method="pca")
+print(prePro.pca)
+
+training1.cs.pca <- predict(prePro.pca,training1.cs)
+
+# final cleaned dataset appending the dependent variable
+training.clean <- cbind(classe=training1$classe,training1.cs.pca)
+```
+
+Note through principle component analysis we reduced the total number of variables from 60 (or more precisely 52) to 25 which is a near half reduction. With this reduction we are still capturing aboug 95% of the variability of all the variables. 
+
+Lastly, just now need to make sure to apply the same pre-processing to the test set which is what I do below. 
+
+```{r, cache=TRUE}
+# Apply the same process to the testing dataset
+testing1.cs <- predict(prePro,testing1[,-c(1:7,60)])
+testing.clean <- predict(prePro.pca,testing1.cs) #Don't need to append the classe variable
+```
+
+# Model
+
+Now I looked at the 3 models below and compared the 3 to choose the model that gives the best results. For the models that I ran, I performed a 10-fold cross-validation on the training dataset. The models that I chose to run are Naive Bayes, Boosting, and Random Forests. The order in which the models were run were based on first starting with the more intuitive and less complex model of the Naive Bayes method, then to increase the complexity by developing a stronger model from weaker trees, then to run the most complex of the 3 and also most computationally intentensive that bootstraps then aggregates the average of many randomly selected trees of the random forest model. 
+
+The results are below: 
+
+1. Naive Bayes 
+
+```{r NB, cache=TRUE, warning=FALSE, message=FALSE}
+
+nb <-train(classe~.,data=training.clean,method="nb",trControl=trainControl(method="cv"))
+print(nb)
+
+```
+
+2. Boosting 
+
+```{r Boosting, cache=TRUE, message=FALSE}
+
+boosting <-train(classe~.,data=training.clean,method="gbm",trControl=trainControl(method="cv"), verbose=FALSE)
+print(boosting)
+
+```
+
+3. Random Forest 
+
+```{r rf, cache=TRUE, message=FALSE}
+
+rf <-train(classe~.,data=training.clean,method="rf",trControl=trainControl(method="cv"))
+print(rf)
+
+```
+
+## Model Summary
+
+We can see that for all the models we had 32 predictors, which are the 25 principal components and the 7 other variables (i.e. date, subject name, etc) being used to model against the 5 classes ('A','B','C','D','E'). Also, you can see under Resampling, that a 10-fold Cross-Validation was used which is the default # of folds that is used when the number is not specified. 
+
+Model         | Accuracy
+--------------|-----------
+Naive Bayes   | 0.6509508
+Boosting      | 0.8254499
+Random Forest | 0.9774983
+
+## Model Selection
+
+Based on the 3 models that I looked at, you can see that Random Forest gives the highest accuracy. With that, we know that the in-sample error will be $1-0.9774983\approx0.0225$. So then the estimated out-of-sample error will be greater than $0.0225$. 
+
+# Apply Model on Testing Dataset
+So now that I have my final model, I will go ahead and apply it on the testing dataset. The results are as follows. 
+
+```{r, message=FALSE}
+test.pred <- predict(rf,newdata=testing.clean)
+print(test.pred)
+```
+
+Applying this to the testing dataset, I got $19/20=0.95$ which means that my out-of-sample error rate was $0.05$ which was around what we expected. 
